@@ -297,6 +297,8 @@ option(ENABLE_LEVEL0 "Experimental and incomplete driver that uses the Level Zer
 option(ENABLE_NPU "Experimental support for Intel NPU (requires LevelZero driver)" OFF)
 
 option(ENABLE_TBB_DEVICE "Enable the Intel TBB device driver." OFF)
+option(ENABLE_VORTEX "Enable the Vortex device driver" OFF)
+
 
 option(ENABLE_HOST_CPU_DEVICES "Add host CPUs as OpenCL devices (cpu & cpu-minimal)." ON)
 
@@ -2213,6 +2215,11 @@ endif()
 
 ##########################################################
 
+if(ENABLE_VORTEX)
+  set(BUILD_VORTEX 1)
+  set(OCL_DRIVERS "${OCL_DRIVERS} vortex")
+endif()
+
 if(ENABLE_CUDA)
 
   if(CMAKE_VERSION VERSION_LESS 3.17.0)
@@ -2580,7 +2587,12 @@ if(ENABLE_TESTS)
     if(ENABLE_HOST_CPU_DEVICES)
       add_custom_target(check COMMAND "${CMAKE_SOURCE_DIR}/tools/scripts/run_cpu_tests" ${COMMON_CTEST_ARGS})
     endif()
-    if(ENABLE_CUDA)
+    if(ENABLE_VORTEX)
+  set(BUILD_VORTEX 1)
+  set(OCL_DRIVERS "${OCL_DRIVERS} vortex")
+endif()
+
+if(ENABLE_CUDA)
       add_custom_target(check-cuda COMMAND "${CMAKE_SOURCE_DIR}/tools/scripts/run_cuda_tests" ${COMMON_CTEST_ARGS})
     endif()
 

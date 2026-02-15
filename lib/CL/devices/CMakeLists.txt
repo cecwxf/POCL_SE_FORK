@@ -184,6 +184,12 @@ if(ENABLE_CUDA)
   endif()
 endif()
 
+if(BUILD_VORTEX)
+  add_subdirectory("vortex")
+  set(POCL_DEVICES_OBJS "${POCL_DEVICES_OBJS}"
+    "$<TARGET_OBJECTS:pocl-devices-vortex>")
+endif()
+
 
 set(POCL_DEVICES_SOURCES
   devices.h  devices.c
