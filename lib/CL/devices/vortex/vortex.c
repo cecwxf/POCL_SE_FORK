@@ -12,6 +12,7 @@
 #include "common_utils.h"
 #include "devices.h"
 #include "pocl_util.h"
+#include "pocl_local_size.h"
 
 #include <assert.h>
 #include <stdlib.h>
@@ -64,15 +65,15 @@ void pocl_vortex_init_device_ops(struct pocl_device_ops *ops)
   ops->setup_metadata = pocl_driver_setup_metadata;
   ops->supports_binary = pocl_driver_supports_binary;
   ops->build_poclbinary = pocl_driver_build_poclbinary;
-  ops->compile_kernel = pocl_driver_compile_kernel;
+  ops->compile_kernel = NULL;
   ops->build_builtin = pocl_driver_build_opencl_builtins;
 
   /* Command submission/execution: stub for now (MVP-1: enumeration only). */
   ops->submit = pocl_vortex_submit;
   ops->run = NULL;
-  ops->flush = pocl_driver_flush;
-  ops->join = pocl_driver_join;
-  ops->notify = pocl_driver_notify;
+  ops->flush = NULL;
+  ops->join = NULL;
+  ops->notify = NULL;
   ops->broadcast = pocl_broadcast;
 
   ops->build_hash = pocl_cpu_build_hash;
