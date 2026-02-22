@@ -57,7 +57,6 @@ IGNORE_COMPILER_WARNING("-Wunused-parameter")
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Passes/StandardInstrumentations.h>
 #include <llvm/Transforms/Scalar/LoopPassManager.h>
-#include <llvm/Frontend/Driver/CodeGenOptions.h>
 
 #include "LLVMUtils.h"
 POP_COMPILER_DIAGS
@@ -135,7 +134,12 @@ static TargetMachine *GetTargetMachine(const char* TTriple,
 #endif
       MCPU, Features, TargetOptions(),
       Reloc::PIC_, CodeModel::Small,
-      CodeGenOptLevel::Aggressive);
+#if LLVM_MAJOR >= 18
+      CodeGenOptLevel::Aggressive
+#else
+      CodeGenOpt::Aggressive
+#endif
+      );
 
   assert(TM != NULL && "llvm target has no targetMachine constructor");
 
@@ -1181,6 +1185,7 @@ static TargetLibraryInfoImpl *initPassManagerForCodeGen(legacy::PassManager &PM,
 
 #ifdef ENABLE_HOST_CPU_VECTORIZE_BUILTINS
   if (DevType == CL_DEVICE_TYPE_CPU) {
+#if LLVM_MAJOR >= 18
     TLII =
         llvm::driver::createTLII(DevTriple,
 #ifdef ENABLE_HOST_CPU_VECTORIZE_LIBMVEC
@@ -1191,6 +1196,9 @@ static TargetLibraryInfoImpl *initPassManagerForCodeGen(legacy::PassManager &PM,
 #endif
 #ifdef ENABLE_HOST_CPU_VECTORIZE_SVML
                                  driver::VectorLibrary::SVML);
+#endif
+#else
+    TLII = new TargetLibraryInfoImpl(DevTriple);
 #endif
     TLIPass = new TargetLibraryInfoWrapperPass(*TLII);
   } else
@@ -1235,9 +1243,13 @@ int pocl_llvm_codegen2(const char* TTriple, const char* MCPU,
     legacy::PassManager PMObj;
     TLIIPtr.reset(initPassManagerForCodeGen(PMObj, TTriple, DevType));
 
+#if LLVM_MAJOR >= 18
+    constexpr auto ObjFileType = llvm::CodeGenFileType::ObjectFile;
+#else
+    constexpr auto ObjFileType = llvm::CodeGenFileType::CGFT_ObjectFile;
+#endif
     cannotEmitFile = Target->addPassesToEmitFile(PMObj, SOS, nullptr,
-                                                 llvm::CodeGenFileType::
-                                                 ObjectFile);
+                                                 ObjFileType);
     LLVMGeneratesObjectFiles = !cannotEmitFile;
 
     if (LLVMGeneratesObjectFiles) {
@@ -1275,8 +1287,12 @@ int pocl_llvm_codegen2(const char* TTriple, const char* MCPU,
     // Have to emit the text first and then call the assembler from the command line
     // to produce the binary.
 
-    if (Target->addPassesToEmitFile(PMAsm, SOS, nullptr,
-                                    llvm::CodeGenFileType::AssemblyFile)) {
+#if LLVM_MAJOR >= 18
+    constexpr auto AsmFileType = llvm::CodeGenFileType::AssemblyFile;
+#else
+    constexpr auto AsmFileType = llvm::CodeGenFileType::CGFT_AssemblyFile;
+#endif
+    if (Target->addPassesToEmitFile(PMAsm, SOS, nullptr, AsmFileType)) {
       POCL_MSG_ERR(
           "llvm_codegen: The target supports neither obj nor asm emission!");
       return -1;

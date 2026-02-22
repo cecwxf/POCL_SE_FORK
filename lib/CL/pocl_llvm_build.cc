@@ -596,8 +596,7 @@ int pocl_llvm_build_program(cl_program program,
     return CL_INVALID_BUILD_OPTIONS;
   }
 
-  LangOptions L = pocl_build.getLangOpts();
-  LangOptions *la = &L;
+  LangOptions *la = pocl_build.getLangOpts();
   PreprocessorOptions &po = pocl_build.getPreprocessorOpts();
   llvm::Triple triple (device->llvm_target_triplet);
 

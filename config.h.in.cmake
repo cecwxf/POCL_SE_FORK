@@ -11,6 +11,7 @@
 #cmakedefine BUILD_ALMAIF
 #cmakedefine BUILD_VULKAN
 #cmakedefine BUILD_LEVEL0
+#cmakedefine BUILD_VORTEX
 #cmakedefine BUILD_REMOTE_SERVER
 #cmakedefine BUILD_REMOTE_CLIENT
 #cmakedefine BUILD_PROXY

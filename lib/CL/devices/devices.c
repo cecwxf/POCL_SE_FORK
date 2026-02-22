@@ -102,6 +102,10 @@
 #include "level0/pocl-level0.h"
 #endif
 
+#ifdef BUILD_VORTEX
+#include "vortex/vortex.h"
+#endif
+
 #define MAX_ENV_NAME_LEN 1024
 
 #ifdef BUILD_REMOTE_CLIENT
@@ -188,6 +192,9 @@ static init_device_ops pocl_devices_init_ops[] = {
 #ifdef BUILD_REMOTE_CLIENT
   INIT_DEV (remote),
 #endif
+#ifdef BUILD_VORTEX
+  INIT_DEV (vortex),
+#endif
 };
 
 #define POCL_NUM_DEVICE_TYPES (sizeof(pocl_devices_init_ops) / sizeof((pocl_devices_init_ops)[0]))
@@ -225,6 +232,9 @@ char pocl_device_types[POCL_NUM_DEVICE_TYPES][33] = {
 #endif
 #ifdef BUILD_REMOTE_CLIENT
   "remote",
+#endif
+#ifdef BUILD_VORTEX
+  "vortex",
 #endif
 };
 
