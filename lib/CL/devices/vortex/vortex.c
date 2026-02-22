@@ -20,10 +20,13 @@
 #include "vortex_runtime.h"
 
 #include <assert.h>
+#include <ctype.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 typedef struct {
   cl_bool available;
@@ -86,27 +89,218 @@ vortex_command_scheduler (pocl_vortex_data_t *d)
 }
 
 static int
-pocl_vortex_run_shell_cmd (const char *cmd)
+pocl_vortex_run_shell_cmd_capture (const char *cmd, char *capture,
+                                   size_t capture_capacity)
 {
   const char *args[] = { "/bin/sh", "-c", cmd, NULL };
-  char capture[8192];
-  size_t captured = sizeof (capture) - 1;
-  capture[0] = 0;
+
+  if (capture != NULL && capture_capacity > 0)
+    capture[0] = 0;
+
+  size_t captured = (capture != NULL && capture_capacity > 0)
+                        ? (capture_capacity - 1)
+                        : 0;
 
   POCL_MSG_PRINT_LLVM ("vortex finalize: %s\n", cmd);
-  int ret = pocl_run_command_capture_output (capture, &captured, args);
-  if (captured < sizeof (capture))
-    capture[captured] = 0;
-  else
-    capture[sizeof (capture) - 1] = 0;
 
-  if (capture[0] != 0)
-    POCL_MSG_PRINT_LLVM ("%s\n", capture);
+  int ret = 0;
+  if (capture != NULL && capture_capacity > 0)
+    ret = pocl_run_command_capture_output (capture, &captured, args);
+  else
+    {
+      char sink[2] = { 0 };
+      size_t sink_size = 1;
+      ret = pocl_run_command_capture_output (sink, &sink_size, args);
+    }
+
+  if (capture != NULL && capture_capacity > 0)
+    {
+      if (captured < capture_capacity)
+        capture[captured] = 0;
+      else
+        capture[capture_capacity - 1] = 0;
+
+      if (capture[0] != 0)
+        POCL_MSG_PRINT_LLVM ("%s\n", capture);
+    }
 
   if (ret != 0)
     POCL_MSG_ERR ("vortex finalize command failed (%d): %s\n", ret, cmd);
 
   return ret;
+}
+
+static int
+pocl_vortex_run_shell_cmd (const char *cmd)
+{
+  char capture[8192];
+  return pocl_vortex_run_shell_cmd_capture (cmd, capture, sizeof (capture));
+}
+
+static int
+pocl_vortex_is_workgroup_entry_symbol (const char *symbol)
+{
+  static const char Prefix[] = "_pocl_kernel_";
+  static const char Suffix[] = "_workgroup";
+
+  if (symbol == NULL)
+    return 0;
+
+  size_t sym_len = strlen (symbol);
+  size_t prefix_len = sizeof (Prefix) - 1;
+  size_t suffix_len = sizeof (Suffix) - 1;
+
+  if (sym_len <= prefix_len + suffix_len)
+    return 0;
+
+  return (strncmp (symbol, Prefix, prefix_len) == 0
+          && strcmp (symbol + sym_len - suffix_len, Suffix) == 0);
+}
+
+static int
+pocl_vortex_resolve_entry_symbol (const char *input_binary, char *entry_symbol,
+                                  size_t entry_symbol_size)
+{
+  const char *nm_tool = pocl_get_string_option ("POCL_VORTEX_NM", "llvm-nm");
+
+  if (entry_symbol == NULL || entry_symbol_size == 0)
+    return -1;
+
+  entry_symbol[0] = 0;
+
+  char nm_cmd[4096];
+  int n = snprintf (nm_cmd, sizeof (nm_cmd),
+                    "%s --defined-only --just-symbol-name '%s'", nm_tool,
+                    input_binary);
+  if (n < 0 || (size_t)n >= sizeof (nm_cmd))
+    {
+      POCL_MSG_ERR ("vortex finalize: nm command too long\n");
+      return -1;
+    }
+
+  char nm_output[16384];
+  if (pocl_vortex_run_shell_cmd_capture (nm_cmd, nm_output, sizeof (nm_output))
+      != 0)
+    {
+      POCL_MSG_ERR ("vortex finalize: failed to run llvm-nm for %s\n",
+                    input_binary);
+      return -1;
+    }
+
+  char *saveptr = NULL;
+  for (char *line = strtok_r (nm_output, "\n", &saveptr); line != NULL;
+       line = strtok_r (NULL, "\n", &saveptr))
+    {
+      while (isspace ((unsigned char)*line))
+        ++line;
+
+      size_t len = strlen (line);
+      while (len > 0 && isspace ((unsigned char)line[len - 1]))
+        line[--len] = 0;
+
+      if (len == 0)
+        continue;
+
+      if (pocl_vortex_is_workgroup_entry_symbol (line))
+        {
+          size_t copy_len = len;
+          if (copy_len >= entry_symbol_size)
+            copy_len = entry_symbol_size - 1;
+          memcpy (entry_symbol, line, copy_len);
+          entry_symbol[copy_len] = 0;
+          POCL_MSG_PRINT_LLVM (
+              "vortex finalize: resolved kernel entry symbol: %s\n",
+              entry_symbol);
+          return 0;
+        }
+    }
+
+  POCL_MSG_ERR (
+      "vortex finalize: no _pocl_kernel_*_workgroup symbol found in %s\n",
+      input_binary);
+  return -1;
+}
+
+static int
+pocl_vortex_validate_elf_load_segments (const char *elf_path)
+{
+  const char *readelf_tool
+      = pocl_get_string_option ("POCL_VORTEX_READELF", "llvm-readelf");
+
+  char readelf_cmd[4096];
+  int n = snprintf (readelf_cmd, sizeof (readelf_cmd), "%s -l '%s'",
+                    readelf_tool, elf_path);
+  if (n < 0 || (size_t)n >= sizeof (readelf_cmd))
+    {
+      POCL_MSG_ERR ("vortex finalize: readelf command too long\n");
+      return -1;
+    }
+
+  char readelf_output[16384];
+  if (pocl_vortex_run_shell_cmd_capture (readelf_cmd, readelf_output,
+                                         sizeof (readelf_output))
+      != 0)
+    {
+      POCL_MSG_ERR ("vortex finalize: readelf failed for %s\n", elf_path);
+      return -1;
+    }
+
+  unsigned load_segments = 0;
+  char *saveptr = NULL;
+  for (char *line = strtok_r (readelf_output, "\n", &saveptr); line != NULL;
+       line = strtok_r (NULL, "\n", &saveptr))
+    {
+      while (isspace ((unsigned char)*line))
+        ++line;
+
+      if (strncmp (line, "LOAD", 4) == 0
+          && (line[4] == ' ' || line[4] == '\t' || line[4] == 0))
+        ++load_segments;
+    }
+
+  if (load_segments == 0)
+    {
+      POCL_MSG_ERR ("vortex finalize: ELF %s has no LOAD segment\n", elf_path);
+      return -1;
+    }
+
+  POCL_MSG_PRINT_LLVM ("vortex finalize: ELF %s has %u LOAD segment(s)\n",
+                       elf_path, load_segments);
+  return 0;
+}
+
+static int
+pocl_vortex_validate_vxbin_size (const char *output_binary)
+{
+  struct stat st;
+  if (stat (output_binary, &st) != 0)
+    {
+      POCL_MSG_ERR ("vortex finalize: stat(%s) failed: %s\n", output_binary,
+                    strerror (errno));
+      return -1;
+    }
+
+  if (!S_ISREG (st.st_mode))
+    {
+      POCL_MSG_ERR ("vortex finalize: %s is not a regular file\n",
+                    output_binary);
+      return -1;
+    }
+
+  int min_size = pocl_get_int_option ("POCL_VORTEX_MIN_VXBIN_SIZE", 256);
+  if (min_size < 1)
+    min_size = 1;
+
+  if (st.st_size < (off_t)min_size)
+    {
+      POCL_MSG_ERR ("vortex finalize: vxbin too small: %lld bytes (< %d) at %s\n",
+                    (long long)st.st_size, min_size, output_binary);
+      return -1;
+    }
+
+  POCL_MSG_PRINT_LLVM ("vortex finalize: vxbin size=%lld bytes (threshold=%d)\n",
+                       (long long)st.st_size, min_size);
+  return 0;
 }
 
 static int
@@ -116,9 +310,24 @@ pocl_vortex_finalize_binary (cl_device_id device, const char *output_binary,
   (void)device;
 
   const char *clang = pocl_get_path ("CLANG", "clang");
-  const char *vortex_cflags = pocl_get_string_option ("POCL_VORTEX_CFLAGS", "");
-  const char *vortex_ldflags = pocl_get_string_option ("POCL_VORTEX_LDFLAGS", "");
-  const char *vortex_bintool = pocl_get_string_option ("POCL_VORTEX_BINTOOL", "");
+  const char *vortex_cflags
+      = pocl_get_string_option ("POCL_VORTEX_CFLAGS", "");
+  const char *vortex_finalize_cflags
+      = pocl_get_string_option ("POCL_VORTEX_FINALIZE_CFLAGS", "");
+  if (vortex_finalize_cflags == NULL || vortex_finalize_cflags[0] == 0)
+    vortex_finalize_cflags = vortex_cflags;
+  const char *vortex_ldflags
+      = pocl_get_string_option ("POCL_VORTEX_LDFLAGS", "");
+  const char *vortex_bintool
+      = pocl_get_string_option ("POCL_VORTEX_BINTOOL", "");
+  const char *vortex_objcopy
+      = pocl_get_string_option ("POCL_VORTEX_OBJCOPY", "llvm-objcopy");
+  const char *vortex_wrapper_cflags
+      = pocl_get_string_option (
+          "POCL_VORTEX_WRAPPER_CFLAGS",
+          "--target=riscv32-unknown-elf -march=rv32im -mabi=ilp32 -nostdlib");
+  const char *vortex_stack_offset
+      = pocl_get_string_option ("POCL_VORTEX_STACK_OFFSET", "65536");
 
   if (vortex_bintool == NULL || vortex_bintool[0] == 0)
     {
@@ -126,42 +335,154 @@ pocl_vortex_finalize_binary (cl_device_id device, const char *output_binary,
       return -1;
     }
 
-  char temp_elf[POCL_MAX_PATHNAME_LENGTH];
-  if (pocl_mk_tempname (temp_elf, output_binary, ".elf", NULL) != 0)
+  char entry_symbol[512];
+  if (pocl_vortex_resolve_entry_symbol (input_binary, entry_symbol,
+                                        sizeof (entry_symbol))
+      != 0)
     {
-      POCL_MSG_ERR ("vortex: unable to create temporary ELF path\n");
       return -1;
     }
 
+  char entry_impl_symbol[640];
+  int n = snprintf (entry_impl_symbol, sizeof (entry_impl_symbol),
+                    "%s__pocl_impl", entry_symbol);
+  if (n < 0 || (size_t)n >= sizeof (entry_impl_symbol))
+    {
+      POCL_MSG_ERR ("vortex finalize: entry symbol rename is too long\n");
+      return -1;
+    }
+
+  char temp_elf[POCL_MAX_PATHNAME_LENGTH];
+  char temp_obj[POCL_MAX_PATHNAME_LENGTH];
+  char wrapper_src[POCL_MAX_PATHNAME_LENGTH];
+  char wrapper_obj[POCL_MAX_PATHNAME_LENGTH];
+
+  if (pocl_mk_tempname (temp_elf, output_binary, ".elf", NULL) != 0
+      || pocl_mk_tempname (temp_obj, output_binary, ".entry.o", NULL) != 0
+      || pocl_mk_tempname (wrapper_src, output_binary, ".entry.S", NULL) != 0
+      || pocl_mk_tempname (wrapper_obj, output_binary, ".entrywrap.o", NULL)
+             != 0)
+    {
+      POCL_MSG_ERR ("vortex: unable to create temporary finalize files\n");
+      return -1;
+    }
+
+  int ret = -1;
+
+  char wrapper_code[4096];
+  n = snprintf (
+      wrapper_code, sizeof (wrapper_code),
+      ".text\n"
+      ".globl %s\n"
+      ".type %s, @function\n"
+      "%s:\n"
+      "  li t0, 1\n"
+      "  .insn r 0x0b, 0, 0, x0, t0, x0\n"
+      "  .option push\n"
+      "  .option norelax\n"
+      "  la gp, __global_pointer\n"
+      "  .option pop\n"
+      "  li t1, %s\n"
+      "  add sp, a0, t1\n"
+      "  mv t0, a0\n"
+      "  addi a0, t0, %u\n"
+      "  mv a1, t0\n"
+      "  li a2, 0\n"
+      "  li a3, 0\n"
+      "  li a4, 0\n"
+      "  call %s\n"
+      "  li t0, 0x88\n"
+      "  sw zero, 0(t0)\n"
+      "  fence\n"
+      "  .insn r 0x0b, 0, 0, x0, x0, x0\n"
+      "1:\n"
+      "  j 1b\n"
+      ".size %s, .-%s\n",
+      entry_symbol, entry_symbol, entry_symbol, vortex_stack_offset,
+      (unsigned)ALIGNED_CTX_SIZE, entry_impl_symbol, entry_symbol,
+      entry_symbol);
+  if (n < 0 || (size_t)n >= sizeof (wrapper_code))
+    {
+      POCL_MSG_ERR ("vortex finalize: wrapper source overflow\n");
+      goto FINISH;
+    }
+
+  if (pocl_write_file (wrapper_src, wrapper_code, strlen (wrapper_code), 0)
+      != 0)
+    {
+      POCL_MSG_ERR ("vortex finalize: failed to write wrapper source %s\n",
+                    wrapper_src);
+      goto FINISH;
+    }
+
+  char rename_cmd[8192];
+  n = snprintf (rename_cmd, sizeof (rename_cmd),
+                "%s --redefine-sym %s=%s '%s' '%s'", vortex_objcopy,
+                entry_symbol, entry_impl_symbol, input_binary, temp_obj);
+  if (n < 0 || (size_t)n >= sizeof (rename_cmd))
+    {
+      POCL_MSG_ERR ("vortex finalize: objcopy command too long\n");
+      goto FINISH;
+    }
+
+  if (pocl_vortex_run_shell_cmd (rename_cmd) != 0)
+    goto FINISH;
+
+  char compile_cmd[8192];
+  n = snprintf (compile_cmd, sizeof (compile_cmd),
+                "%s %s -c '%s' -o '%s'", clang, vortex_wrapper_cflags,
+                wrapper_src, wrapper_obj);
+  if (n < 0 || (size_t)n >= sizeof (compile_cmd))
+    {
+      POCL_MSG_ERR ("vortex finalize: wrapper compile command too long\n");
+      goto FINISH;
+    }
+
+  if (pocl_vortex_run_shell_cmd (compile_cmd) != 0)
+    goto FINISH;
+
   char link_cmd[8192];
-  int n = snprintf (link_cmd, sizeof (link_cmd), "%s %s %s %s -o %s", clang,
-                    vortex_cflags, input_binary, vortex_ldflags, temp_elf);
+  n = snprintf (link_cmd, sizeof (link_cmd),
+                "%s %s '%s' '%s' %s -Wl,-e,%s -o '%s'", clang,
+                vortex_finalize_cflags, temp_obj, wrapper_obj, vortex_ldflags,
+                entry_symbol, temp_elf);
   if (n < 0 || (size_t)n >= sizeof (link_cmd))
     {
       POCL_MSG_ERR ("vortex: link command too long\n");
-      return -1;
+      goto FINISH;
     }
 
   if (pocl_vortex_run_shell_cmd (link_cmd) != 0)
-    {
-      pocl_remove (temp_elf);
-      return -1;
-    }
+    goto FINISH;
+
+  if (pocl_vortex_validate_elf_load_segments (temp_elf) != 0)
+    goto FINISH;
 
   char pack_cmd[8192];
-  n = snprintf (pack_cmd, sizeof (pack_cmd), "%s %s %s", vortex_bintool,
+  n = snprintf (pack_cmd, sizeof (pack_cmd), "%s '%s' '%s'", vortex_bintool,
                 temp_elf, output_binary);
   if (n < 0 || (size_t)n >= sizeof (pack_cmd))
     {
       POCL_MSG_ERR ("vortex: bintool command too long\n");
-      pocl_remove (temp_elf);
-      return -1;
+      goto FINISH;
     }
 
-  int ret = pocl_vortex_run_shell_cmd (pack_cmd);
+  if (pocl_vortex_run_shell_cmd (pack_cmd) != 0)
+    goto FINISH;
 
+  if (pocl_vortex_validate_vxbin_size (output_binary) != 0)
+    goto FINISH;
+
+  ret = 0;
+
+FINISH:
   if (!pocl_get_bool_option ("POCL_LEAVE_KERNEL_COMPILER_TEMP_FILES", 0))
-    pocl_remove (temp_elf);
+    {
+      pocl_remove (temp_elf);
+      pocl_remove (temp_obj);
+      pocl_remove (wrapper_src);
+      pocl_remove (wrapper_obj);
+    }
 
   return ret;
 }
@@ -518,6 +839,11 @@ pocl_vortex_run (void *data, _cl_command_node *cmd)
       abuf_size += ptr_size;
     }
 
+  size_t stack_slack = (size_t)pocl_get_int_option ("POCL_VORTEX_STACK_SLACK", 69632);
+  if (stack_slack < 4096)
+    stack_slack = 4096;
+  abuf_size += stack_slack;
+
   uint8_t *host_args_base_ptr = (uint8_t *)calloc (1, abuf_size);
   if (host_args_base_ptr == NULL)
     POCL_ABORT ("vortex: host args buffer allocation failed\n");
@@ -763,6 +1089,7 @@ pocl_vortex_init (unsigned j, cl_device_id dev, const char *parameters)
   dev->llvm_target_triplet = vortex_triple;
   if (dev->llvm_cpu == NULL || dev->llvm_cpu[0] == 0)
     dev->llvm_cpu = is_64bit ? "generic-rv64" : "generic-rv32";
+
 
   if (dev->kernellib_subdir == NULL)
     dev->kernellib_subdir = "host";
