@@ -328,6 +328,10 @@ pocl_vortex_finalize_binary (cl_device_id device, const char *output_binary,
           "--target=riscv32-unknown-elf -march=rv32im -mabi=ilp32 -nostdlib");
   const char *vortex_stack_offset
       = pocl_get_string_option ("POCL_VORTEX_STACK_OFFSET", "65536");
+  const char *vortex_tp_offset
+      = pocl_get_string_option ("POCL_VORTEX_TP_OFFSET", "32768");
+  const int wrapper_probe_only
+      = pocl_get_bool_option ("POCL_VORTEX_PROBE_ONLY", 0);
 
   if (vortex_bintool == NULL || vortex_bintool[0] == 0)
     {
@@ -369,6 +373,49 @@ pocl_vortex_finalize_binary (cl_device_id device, const char *output_binary,
 
   int ret = -1;
 
+  char wrapper_body[1024];
+  if (wrapper_probe_only)
+    n = snprintf (wrapper_body, sizeof (wrapper_body),
+                  "  li t0, 2\n"
+                  "  sw t0, 264(s0)\n");
+  else
+    n = snprintf (wrapper_body, sizeof (wrapper_body),
+                  "  li t2, 0\n"
+                  "2:\n"
+                  "  lw t3, 8(s0)\n"
+                  "  bgeu t2, t3, 9f\n"
+                  "  li t4, 0\n"
+                  "3:\n"
+                  "  lw t5, 4(s0)\n"
+                  "  bgeu t4, t5, 8f\n"
+                  "  li t6, 0\n"
+                  "4:\n"
+                  "  lw t3, 0(s0)\n"
+                  "  bgeu t6, t3, 7f\n"
+                  "  addi a0, s0, %u\n"
+                  "  mv a1, s0\n"
+                  "  mv a2, t6\n"
+                  "  mv a3, t4\n"
+                  "  mv a4, t2\n"
+                  "  call %s\n"
+                  "  addi t6, t6, 1\n"
+                  "  j 4b\n"
+                  "7:\n"
+                  "  addi t4, t4, 1\n"
+                  "  j 3b\n"
+                  "8:\n"
+                  "  addi t2, t2, 1\n"
+                  "  j 2b\n"
+                  "9:\n"
+                  "  li t0, 1\n"
+                  "  sw t0, 264(s0)\n",
+                  (unsigned)ALIGNED_CTX_SIZE, entry_impl_symbol);
+  if (n < 0 || (size_t)n >= sizeof (wrapper_body))
+    {
+      POCL_MSG_ERR ("vortex finalize: wrapper body overflow\n");
+      goto FINISH;
+    }
+
   char wrapper_code[4096];
   n = snprintf (
       wrapper_code, sizeof (wrapper_code),
@@ -376,30 +423,36 @@ pocl_vortex_finalize_binary (cl_device_id device, const char *output_binary,
       ".globl %s\n"
       ".type %s, @function\n"
       "%s:\n"
-      "  li t0, 1\n"
-      "  .insn r 0x0b, 0, 0, x0, t0, x0\n"
+      "  csrr s0, 0x340\n"
+      "  li t1, 1\n"
+      "  .insn r 0x0b, 0, 0, x0, t1, x0\n"
       "  .option push\n"
       "  .option norelax\n"
       "  la gp, __global_pointer\n"
       "  .option pop\n"
       "  li t1, %s\n"
-      "  add sp, a0, t1\n"
-      "  mv t0, a0\n"
-      "  addi a0, t0, %u\n"
-      "  mv a1, t0\n"
+      "  add sp, s0, t1\n"
+      "  li t1, %s\n"
+      "  add tp, s0, t1\n"
+      "  sw s0, 256(s0)\n"
+      "  addi t0, s0, %u\n"
+      "  sw t0, 260(s0)\n"
+      "  sw zero, 264(s0)\n"
+      "  addi a0, s0, %u\n"
+      "  mv a1, s0\n"
       "  li a2, 0\n"
       "  li a3, 0\n"
       "  li a4, 0\n"
-      "  call %s\n"
+      "%s"
+      "  li a0, 0\n"
       "  li t0, 0x88\n"
-      "  sw zero, 0(t0)\n"
+      "  sw a0, 0(t0)\n"
       "  fence\n"
       "  .insn r 0x0b, 0, 0, x0, x0, x0\n"
-      "1:\n"
-      "  j 1b\n"
       ".size %s, .-%s\n",
       entry_symbol, entry_symbol, entry_symbol, vortex_stack_offset,
-      (unsigned)ALIGNED_CTX_SIZE, entry_impl_symbol, entry_symbol,
+      vortex_tp_offset, (unsigned)ALIGNED_CTX_SIZE,
+      (unsigned)ALIGNED_CTX_SIZE, wrapper_body, entry_symbol,
       entry_symbol);
   if (n < 0 || (size_t)n >= sizeof (wrapper_code))
     {
@@ -444,7 +497,7 @@ pocl_vortex_finalize_binary (cl_device_id device, const char *output_binary,
   char link_cmd[8192];
   n = snprintf (link_cmd, sizeof (link_cmd),
                 "%s %s '%s' '%s' %s -Wl,-e,%s -o '%s'", clang,
-                vortex_finalize_cflags, temp_obj, wrapper_obj, vortex_ldflags,
+                vortex_finalize_cflags, wrapper_obj, temp_obj, vortex_ldflags,
                 entry_symbol, temp_elf);
   if (n < 0 || (size_t)n >= sizeof (link_cmd))
     {
@@ -805,6 +858,11 @@ pocl_vortex_run (void *data, _cl_command_node *cmd)
   if (num_groups == 0)
     return;
 
+  const int run_probe = pocl_get_bool_option ("POCL_VORTEX_PROBE", 0);
+  uint64_t ready_timeout
+      = (uint64_t)pocl_get_int_option ("POCL_VORTEX_READY_TIMEOUT_MS",
+                                       (int)VX_MAX_TIMEOUT);
+
   const size_t ptr_size = d->is_64bit ? 8 : 4;
   size_t abuf_args_size = ptr_size * (meta->num_args + meta->num_locals);
   size_t abuf_size = ALIGNED_CTX_SIZE + abuf_args_size;
@@ -849,12 +907,15 @@ pocl_vortex_run (void *data, _cl_command_node *cmd)
     POCL_ABORT ("vortex: host args buffer allocation failed\n");
 
   vx_buffer_h vx_args_buffer = NULL;
-  if (vx_mem_alloc (d->vx_device, abuf_size, VX_MEM_READ, &vx_args_buffer) != 0)
+  if (vx_mem_alloc (d->vx_device, abuf_size, VX_MEM_READ_WRITE, &vx_args_buffer) != 0)
     POCL_ABORT ("vortex: vx_mem_alloc(args) failed\n");
 
   uint64_t dev_args_base_addr = 0;
   if (vx_mem_address (vx_args_buffer, &dev_args_base_addr) != 0)
     POCL_ABORT ("vortex: vx_mem_address(args) failed\n");
+  POCL_MSG_WARN ("vortex run: args_base=0x%llx abuf=%zu ptr_size=%u\n",
+                 (unsigned long long)dev_args_base_addr, abuf_size,
+                 (unsigned)ptr_size);
 
   vx_buffer_h vx_local_buffer = NULL;
   uint64_t local_mem_addr = 0;
@@ -876,6 +937,10 @@ pocl_vortex_run (void *data, _cl_command_node *cmd)
         ctx->global_offset[i] = pc->global_offset[i];
         ctx->local_size[i] = pc->local_size[i];
       }
+    POCL_MSG_WARN ("vortex ctx: groups=(%u,%u,%u) local=(%u,%u,%u) wd=%u\n",
+                   ctx->num_groups[0], ctx->num_groups[1], ctx->num_groups[2],
+                   ctx->local_size[0], ctx->local_size[1], ctx->local_size[2],
+                   (unsigned)pc->work_dim);
     ctx->work_dim = pc->work_dim;
     ctx->printf_buffer = 0;
     ctx->printf_buffer_position = 0;
@@ -910,6 +975,8 @@ pocl_vortex_run (void *data, _cl_command_node *cmd)
               if (buf != NULL && vx_mem_address (buf->vx_buffer, &dev_ptr) == 0)
                 dev_ptr += al->offset;
             }
+          POCL_MSG_WARN ("vortex arg%u ptr=0x%llx\n", i,
+                         (unsigned long long)dev_ptr);
           vortex_store_ptr (slot, ptr_size, dev_ptr);
           dev_data_addr += ptr_size;
         }
@@ -946,7 +1013,7 @@ pocl_vortex_run (void *data, _cl_command_node *cmd)
           d->vx_kernel_buffer = NULL;
         }
 
-      char program_bin_path[POCL_MAX_FILENAME_LENGTH];
+      char program_bin_path[POCL_MAX_PATHNAME_LENGTH];
       if (pocl_check_kernel_disk_cache (program_bin_path, cmd, 0) != CL_SUCCESS)
         POCL_ABORT ("vortex: failed to get kernel binary path\n");
 
@@ -960,7 +1027,29 @@ pocl_vortex_run (void *data, _cl_command_node *cmd)
   if (vx_start (d->vx_device, d->vx_kernel_buffer, vx_args_buffer) != 0)
     POCL_ABORT ("vortex: vx_start failed\n");
 
-  if (vx_ready_wait (d->vx_device, VX_MAX_TIMEOUT) != 0)
+  int ready_rc = vx_ready_wait (d->vx_device, ready_timeout);
+
+  if (run_probe)
+    {
+      uint32_t probe_words[4] = { 0, 0, 0, 0 };
+      if (abuf_size >= 272
+          && vx_copy_from_dev (probe_words, vx_args_buffer, 256,
+                               sizeof (probe_words))
+                 == 0)
+        {
+          POCL_MSG_WARN (
+              "vortex probe: mscratch=0x%x a0=0x%x marker=%u extra=0x%x\n",
+              probe_words[0], probe_words[1], probe_words[2], probe_words[3]);
+        }
+      else
+        {
+          POCL_MSG_WARN ("vortex probe: failed to read probe words\n");
+        }
+
+      /* IO exitcode probe omitted in minimal runtime header mode. */
+    }
+
+  if (ready_rc != 0)
     POCL_ABORT ("vortex: vx_ready_wait failed\n");
 
   if (vx_local_buffer != NULL)
