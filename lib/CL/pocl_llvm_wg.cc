@@ -47,6 +47,7 @@ IGNORE_COMPILER_WARNING("-Wunused-parameter")
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/Linker/Linker.h>
 #include <llvm/Support/CodeGen.h>
+#include <llvm/Support/TargetSelect.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Target/TargetOptions.h>
 #include <llvm/Transforms/Utils/Cloning.h>
@@ -60,6 +61,8 @@ IGNORE_COMPILER_WARNING("-Wunused-parameter")
 
 #include "LLVMUtils.h"
 POP_COMPILER_DIAGS
+
+#include <mutex>
 
 #include "common.h"
 #include "pocl.h"
@@ -116,6 +119,15 @@ static TargetMachine *GetTargetMachine(const char* TTriple,
                                        const char* MCPU = "",
                                        const char* Features = "") {
 
+  static std::once_flag TargetInitOnce;
+  std::call_once(TargetInitOnce, []() {
+    InitializeAllTargetInfos();
+    InitializeAllTargets();
+    InitializeAllTargetMCs();
+    InitializeAllAsmParsers();
+    InitializeAllAsmPrinters();
+  });
+
   std::string Error;
 
   const Target *TheTarget = TargetRegistry::lookupTarget(TTriple,
@@ -123,6 +135,9 @@ static TargetMachine *GetTargetMachine(const char* TTriple,
 
   // OpenASIP targets are not in the registry
   if (!TheTarget) {
+    POCL_MSG_ERR("GetTargetMachine: lookupTarget failed for triple=%s cpu=%s features=%s err=%s\n",
+                 TTriple ? TTriple : "", MCPU ? MCPU : "",
+                 Features ? Features : "", Error.c_str());
     return nullptr;
   }
 
@@ -1226,8 +1241,25 @@ int pocl_llvm_codegen2(const char* TTriple, const char* MCPU,
   *Output = nullptr;
   std::unique_ptr<llvm::TargetLibraryInfoImpl> TLIIPtr;
 
+  if (Features && Features[0] != '\0') {
+    for (auto &F : *Input) {
+      if (F.isDeclaration())
+        continue;
+      F.removeFnAttr("target-features");
+      F.addFnAttr("target-features", Features);
+    }
+    POCL_MSG_PRINT_LLVM("Applying forced codegen target-features to all functions: %s\n",
+                        Features);
+  }
+
   std::unique_ptr<llvm::TargetMachine> TM(GetTargetMachine(TTriple, MCPU, Features));
   llvm::TargetMachine *Target = TM.get();
+  if (Target == nullptr) {
+    POCL_MSG_ERR("llvm_codegen: failed to create target machine (triple=%s cpu=%s features=%s)\n",
+                 TTriple ? TTriple : "", MCPU ? MCPU : "",
+                 Features ? Features : "");
+    return -1;
+  }
 
   // First try direct object code generation from LLVM, if supported by the
   // LLVM backend for the target.
