@@ -28,6 +28,12 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#if defined(NDEBUG)
+#define VX_CALLLOG(...) do { } while (0)
+#else
+#define VX_CALLLOG(...) POCL_MSG_WARN(__VA_ARGS__)
+#endif
+
 typedef struct {
   cl_bool available;
   vx_device_h vx_device;
@@ -1017,17 +1023,27 @@ pocl_vortex_run (void *data, _cl_command_node *cmd)
       if (pocl_check_kernel_disk_cache (program_bin_path, cmd, 0) != CL_SUCCESS)
         POCL_ABORT ("vortex: failed to get kernel binary path\n");
 
-      if (vx_upload_kernel_file (d->vx_device, program_bin_path,
-                                 &d->vx_kernel_buffer)
-          != 0)
+      VX_CALLLOG ("vortex run: calling vx_upload_kernel_file(%s)\n",
+                     program_bin_path);
+      int upload_rc = vx_upload_kernel_file (d->vx_device, program_bin_path,
+                                 &d->vx_kernel_buffer);
+      VX_CALLLOG ("vortex run: vx_upload_kernel_file rc=%d kbuf=%p\n",
+                     upload_rc, (void*)d->vx_kernel_buffer);
+      if (upload_rc != 0)
         POCL_ABORT ("vortex: vx_upload_kernel_file failed for %s\n",
                     program_bin_path);
     }
 
-  if (vx_start (d->vx_device, d->vx_kernel_buffer, vx_args_buffer) != 0)
+  VX_CALLLOG ("vortex run: calling vx_start(kbuf=%p, abuf=%p)\n",
+                 (void*)d->vx_kernel_buffer, (void*)vx_args_buffer);
+  int start_rc = vx_start (d->vx_device, d->vx_kernel_buffer, vx_args_buffer);
+  VX_CALLLOG ("vortex run: vx_start rc=%d\n", start_rc);
+  if (start_rc != 0)
     POCL_ABORT ("vortex: vx_start failed\n");
 
+  VX_CALLLOG ("vortex run: calling vx_ready_wait(timeout=%d)\n", ready_timeout);
   int ready_rc = vx_ready_wait (d->vx_device, ready_timeout);
+  VX_CALLLOG ("vortex run: vx_ready_wait rc=%d\n", ready_rc);
 
   if (run_probe)
     {
@@ -1136,7 +1152,9 @@ pocl_vortex_init (unsigned j, cl_device_id dev, const char *parameters)
   if (!data)
     return CL_OUT_OF_HOST_MEMORY;
 
+  VX_CALLLOG ("vortex init: calling vx_dev_open\n");
   int vx_err = vx_dev_open (&data->vx_device);
+  VX_CALLLOG ("vortex init: vx_dev_open rc=%d dev=%p\n", vx_err, (void*)data->vx_device);
   if (vx_err != 0)
     {
       free (data);
@@ -1229,7 +1247,10 @@ pocl_vortex_uninit (unsigned j, cl_device_id dev)
       if (d->vx_kernel_buffer != NULL)
         vx_mem_free (d->vx_kernel_buffer);
       if (d->vx_device != NULL)
-        vx_dev_close (d->vx_device);
+        {
+          VX_CALLLOG ("vortex uninit: calling vx_dev_close(%p)\n", (void*)d->vx_device);
+          vx_dev_close (d->vx_device);
+        }
       POCL_DESTROY_LOCK (d->cq_lock);
       free (d);
       dev->data = NULL;

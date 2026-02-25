@@ -166,3 +166,39 @@ visible, do
 
 PoCL is distributed under the terms of the MIT license. Contributions are expected
 to be made with the same terms.
+
+## Vortex(simx) build + validation (cecwxf fork)
+
+### Configure (Debug default)
+
+```bash
+cmake -S ~/.openclaw/workspace/pocl -B ~/.openclaw/workspace/pocl/build-vx-simx4 \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DLLVM_DIR=/usr/lib64/cmake/llvm \
+  -DENABLE_LLVM=ON \
+  -DENABLE_VORTEX=ON \
+  -DENABLE_LOADABLE_DRIVERS=ON \
+  -DENABLE_HOST_CPU_DEVICES=OFF \
+  -DEXTRA_OCL_TARGETS=host \
+  -DKERNELLIB_HOST_CPU_VARIANTS=generic-rv32 \
+  -DOCL_KERNEL_TARGET=riscv32-unknown-elf \
+  -DOCL_KERNEL_TARGET_CPU=generic-rv32 \
+  -DEXTRA_HOST_CLANG_FLAGS="--target=riscv32-unknown-elf -march=rv32imafdc -mabi=ilp32d" \
+  -DEXTRA_KERNEL_CL_FLAGS= \
+  -DVORTEX_DRIVER_INC=~/.openclaw/workspace/vortex/runtime/include \
+  -DVORTEX_DRIVER_LIB=~/.openclaw/workspace/vortex/runtime/libvortex.so
+```
+
+### Build key targets
+
+```bash
+cmake --build ~/.openclaw/workspace/pocl/build-vx-simx4 -j4 --target \
+  kernel_host_generic-rv32 pocl pocl-devices-vortex vecadd
+```
+
+### Validate with MNN-side scripts
+
+```bash
+cd ~/.openclaw/workspace/mnn
+bash ~/.openclaw/workspace/scripts/run_mnn_pocl_vortex_tests.sh
+```
