@@ -41,8 +41,7 @@ int main(int argc, char *argv[]) {
 
   CompilerInstance CI;
   CompilerInvocation &pocl_build = CI.getInvocation();
-  LangOptions L = pocl_build.getLangOpts();
-  LangOptions *la = &L;
+  LangOptions *la = pocl_build.getLangOpts();
   PreprocessorOptions &po = pocl_build.getPreprocessorOpts();
   po.Includes.push_back("/usr/include/test/path.h");
 

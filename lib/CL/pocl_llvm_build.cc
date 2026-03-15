@@ -508,6 +508,13 @@ int pocl_llvm_build_program(cl_program program,
   if (device->llvm_abi != NULL)
     ss << "-target-abi " << device->llvm_abi << " ";
 
+  if (device->ops != nullptr && device->ops->device_name != nullptr
+      && std::string(device->ops->device_name) == "vortex") {
+    const char *vortex_cflags = pocl_get_string_option("POCL_VORTEX_CFLAGS", "");
+    if (vortex_cflags != nullptr && vortex_cflags[0] != '\0')
+      ss << vortex_cflags << " ";
+  }
+
   std::string AllBuildOpts = ss.str();
 
   POCL_MSG_PRINT_LLVM("all build options: %s\n", AllBuildOpts.c_str());
@@ -596,8 +603,7 @@ int pocl_llvm_build_program(cl_program program,
     return CL_INVALID_BUILD_OPTIONS;
   }
 
-  LangOptions L = pocl_build.getLangOpts();
-  LangOptions *la = &L;
+  LangOptions *la = pocl_build.getLangOpts();
   PreprocessorOptions &po = pocl_build.getPreprocessorOpts();
   llvm::Triple triple (device->llvm_target_triplet);
 

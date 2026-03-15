@@ -706,7 +706,7 @@ Value *pocl::emitPrintfCall(IRBuilder<> &Builder,
 
     // End block, returns -1 on failure
     BranchInst::Create(End, ArgPush);
-    Builder.SetInsertPoint(End->getFirstInsertionPt());
+    Builder.SetInsertPoint(End, End->getFirstInsertionPt());
     return Builder.CreateSExt(Builder.CreateNot(Cmp), Int32Ty, "printf_result");
   }
 

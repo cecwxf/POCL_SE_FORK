@@ -184,6 +184,20 @@ if(ENABLE_CUDA)
   endif()
 endif()
 
+if(BUILD_VORTEX)
+  if(VORTEX_DRIVER_INC)
+    include_directories(AFTER "${VORTEX_DRIVER_INC}")
+  endif()
+
+  add_subdirectory("vortex")
+  set(POCL_DEVICES_OBJS "${POCL_DEVICES_OBJS}"
+    "$<TARGET_OBJECTS:pocl-devices-vortex>")
+
+  if(NOT ENABLE_LOADABLE_DRIVERS)
+    list(APPEND POCL_DEVICES_LINK_LIST ${VORTEX_DRIVER_LIB})
+  endif()
+endif()
+
 
 set(POCL_DEVICES_SOURCES
   devices.h  devices.c

@@ -177,7 +177,11 @@ llvm_codegen (char *output, unsigned device_i, cl_kernel kernel,
   if (pocl_exists (final_binary_path))
     goto FINISH;
 
-  error = pocl_llvm_codegen (device, program, "", llvm_module,
+  const char *codegen_features = "";
+  if (device->short_name && strcmp (device->short_name, "Vortex") == 0)
+    codegen_features = pocl_get_string_option ("POCL_VORTEX_CODEGEN_FEATURES", "");
+
+  error = pocl_llvm_codegen (device, program, codegen_features, llvm_module,
                              CL_TRUE, CL_TRUE, &objfile, &objfile_size);
   if (error)
     {

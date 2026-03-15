@@ -166,3 +166,43 @@ visible, do
 
 PoCL is distributed under the terms of the MIT license. Contributions are expected
 to be made with the same terms.
+
+## Unified Vortex(simx) Build/Test Entry
+
+Use the same 3-step flow across MNN/PoCL/Vortex repos:
+
+1. Build Vortex runtime libs (`libvortex.so`, `libvortex-simx.so`, `libsimx.so`)
+2. Build PoCL `build-vx-simx4` (Debug)
+3. Run MNN+PoCL+Vortex validation script
+
+### Quick run
+
+```bash
+# 1) Vortex runtime
+cd ~/.openclaw/workspace/vortex
+make -C third_party -j4
+make -C runtime simx -j4
+
+# 2) PoCL (this repo)
+cmake -S ~/.openclaw/workspace/pocl -B ~/.openclaw/workspace/pocl/build-vx-simx4 \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DLLVM_DIR=/usr/lib64/cmake/llvm \
+  -DENABLE_LLVM=ON -DENABLE_VORTEX=ON -DENABLE_LOADABLE_DRIVERS=ON \
+  -DENABLE_HOST_CPU_DEVICES=OFF -DEXTRA_OCL_TARGETS=host \
+  -DKERNELLIB_HOST_CPU_VARIANTS=generic-rv32 \
+  -DOCL_KERNEL_TARGET=riscv32-unknown-elf -DOCL_KERNEL_TARGET_CPU=generic-rv32 \
+  -DEXTRA_HOST_CLANG_FLAGS="--target=riscv32-unknown-elf -march=rv32imafdc -mabi=ilp32d" \
+  -DVORTEX_DRIVER_INC=~/.openclaw/workspace/vortex/runtime/include \
+  -DVORTEX_DRIVER_LIB=~/.openclaw/workspace/vortex/runtime/libvortex.so
+cmake --build ~/.openclaw/workspace/pocl/build-vx-simx4 -j4 --target \
+  kernel_host_generic-rv32 pocl pocl-devices-vortex vecadd
+
+# 3) Test from MNN
+cd ~/.openclaw/workspace/mnn
+bash ~/.openclaw/workspace/scripts/run_mnn_pocl_vortex_tests.sh
+```
+
+Expected pass criteria:
+- `clinfo` shows `Vortex Open-Source GPU`
+- `vecadd` prints `OK`
+- `run_tiny_matrix_simx.sh` has 4/4 models with `RC=0`
